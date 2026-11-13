@@ -1,0 +1,16 @@
+# Keep the Docker build context small and the cache stable.
+.git
+.github
+.azure-pipelines
+.idea
+.vscode
+*.iml
+.project
+.classpath
+.settings
+docs
+k8s
+infra
+**/target
+!webapp/target/webapp.war
+*.md

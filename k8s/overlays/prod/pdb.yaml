@@ -1,0 +1,10 @@
+# Keeps at least 2 pods running during voluntary disruptions (node upgrades, drains).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: devopsappcicd
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: devopsappcicd

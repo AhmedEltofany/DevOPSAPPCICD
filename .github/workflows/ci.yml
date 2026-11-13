@@ -1,0 +1,139 @@
+# GitHub Actions CI: runs on every push and pull request.
+#
+#   build (Java 17 + 21) -> docker (build, run, smoke test, scan) -> kubernetes manifests check
+#
+# See docs/tutorials/05-github-actions.md for a line-by-line walkthrough.
+name: CI
+
+on:
+  push:
+    branches: [master]
+    paths-ignore: ["docs/**", "**/*.md"]
+  pull_request:
+    paths-ignore: ["docs/**", "**/*.md"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to the same branch cancels the run that is still going.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build & test (Java ${{ matrix.java }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        java: ["17", "21"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+          cache: maven
+
+      - name: mvn verify (tests + coverage gate)
+        run: mvn -B -ntp verify -Dbuild.commit="${GITHUB_SHA::7}"
+
+      - name: Coverage summary
+        if: always() && matrix.java == '17'
+        run: |
+          {
+            echo "### Line coverage"
+            echo "| Module | Covered | Total | % |"
+            echo "|---|---|---|---|"
+            for report in */target/site/jacoco/jacoco.csv; do
+              [ -f "$report" ] || continue
+              module="${report%%/*}"
+              awk -F, -v m="$module" 'NR>1 {missed+=$8; covered+=$9}
+                END {t=missed+covered; printf "| %s | %d | %d | %.1f%% |\n", m, covered, t, (t ? covered*100/t : 0)}' "$report"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload test & coverage reports
+        if: always() && matrix.java == '17'
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: |
+            **/target/surefire-reports/
+            **/target/site/jacoco/
+          if-no-files-found: ignore
+
+      - name: Upload WAR
+        if: matrix.java == '17'
+        uses: actions/upload-artifact@v4
+        with:
+          name: webapp-war
+          path: webapp/target/webapp.war
+
+  docker:
+    name: Docker build & smoke test
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image (multi-stage Dockerfile)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: devopsappcicd:ci
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
+            SKIP_TESTS=true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run container
+        run: docker run -d --name app -p 8080:8080 -e APP_ENV=ci devopsappcicd:ci
+
+      - name: Smoke test
+        run: bash scripts/smoke-test.sh http://localhost:8080 ci
+
+      - name: Container is healthy and not running as root
+        run: |
+          for _ in $(seq 1 20); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' app)
+            echo "health: $status"; [ "$status" = healthy ] && break; sleep 3
+          done
+          [ "$status" = healthy ]
+          [ "$(docker exec app id -u)" = "10001" ]
+
+      - name: Container logs
+        if: always()
+        run: docker logs app
+
+      - name: Vulnerability scan (report only)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image --severity HIGH,CRITICAL --exit-code 0 --no-progress \
+            devopsappcicd:ci
+
+  kubernetes:
+    name: Validate Kubernetes manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz \
+            | tar xz -C /usr/local/bin kubeconform
+
+      - name: Render and validate overlays
+        run: |
+          for overlay in dev prod; do
+            echo "::group::$overlay"
+            kubectl kustomize "k8s/overlays/$overlay" | kubeconform -strict -summary -
+            echo "::endgroup::"
+          done

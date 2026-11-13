@@ -1,0 +1,15 @@
+# Base manifests shared by every environment. Do not apply this directly;
+# apply an overlay instead:  kubectl apply -k k8s/overlays/dev
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - deployment.yaml
+  - service.yaml
+  - hpa.yaml
+
+configMapGenerator:
+  - name: devopsappcicd-config
+    literals:
+      - APP_ENV=base
+      - APP_READY=true

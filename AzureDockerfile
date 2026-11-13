@@ -1,3 +1,31 @@
-FROM tomcat:latest
-COPY ./webapp/target/webapp.war /usr/local/tomcat/webapps
-RUN cp -r /usr/local/tomcat/webapps.dist/* /usr/local/tomcat/webapps
+# Packages a WAR that was ALREADY built by `mvn package` (CI does this before the Docker step).
+# Used by azure-pipelines.yml and the Jenkinsfile so the code is compiled and tested only once.
+#
+#   mvn -B package
+#   docker build -f AzureDockerfile -t devopsappcicd .
+#
+# For a self-contained build that compiles inside Docker, use the main Dockerfile.
+
+FROM tomcat:10.1-jre17-temurin
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --system --gid 10001 app \
+ && useradd --system --uid 10001 --gid app --no-create-home app \
+ && rm -rf /usr/local/tomcat/webapps/* \
+ && chown -R app:app /usr/local/tomcat
+
+COPY --chown=app:app ./webapp/target/webapp.war /usr/local/tomcat/webapps/ROOT.war
+
+ENV CATALINA_OPTS="-XX:MaxRAMPercentage=75 -XX:+ExitOnOutOfMemoryError" \
+    APP_ENV=docker
+
+USER 10001
+EXPOSE 8080
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=40s --retries=3 \
+  CMD curl -fsS http://localhost:8080/health/live || exit 1
+
+CMD ["catalina.sh", "run"]
