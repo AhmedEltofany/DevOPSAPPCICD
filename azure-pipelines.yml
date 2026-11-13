@@ -1,22 +1,151 @@
-# Maven
-# Build your Java project and run tests with Apache Maven.
-# Add steps that analyze code, save build artifacts, deploy, and more:
-# https://docs.microsoft.com/azure/devops/pipelines/languages/java
+# Azure Pipelines: multi-stage CI/CD
+#
+#   Build & test  ->  Docker image (ACR)  ->  Deploy dev  ->  Deploy prod (manual approval)
+#
+# Out of the box only the "Build & test" stage runs, so the pipeline is green on any
+# Azure DevOps project. To switch on Docker + deployments:
+#   1. create the Azure resources       (docs/tutorials/08-azure-infra-bicep.md)
+#   2. create the two service connections and the environments
+#                                       (docs/tutorials/04-azure-pipelines.md)
+#   3. fill in the variables below and set enableDeploy to true.
 
 trigger:
-- master
+  branches:
+    include:
+      - master
+  paths:
+    exclude:
+      - docs
+      - README.md
+
+pr:
+  branches:
+    include:
+      - master
 
 pool:
   vmImage: ubuntu-latest
 
-steps:
-- task: Maven@3
-  inputs:
-    mavenPomFile: 'pom.xml'
-    mavenOptions: '-Xmx3072m'
-    javaHomeOption: 'JDKVersion'
-    jdkVersionOption: '1.11'
-    jdkArchitectureOption: 'x64'
-    publishJUnitResults: true
-    testResultsFiles: '**/surefire-reports/TEST-*.xml'
-    goals: 'package'
+variables:
+  # ---------- Change these to match your Azure setup ----------
+  enableDeploy: false                                   # true = add Docker + deploy stages
+  dockerRegistryServiceConnection: acr-service-connection
+  azureSubscription: azure-service-connection           # Azure Resource Manager connection
+  containerRegistry: myregistry.azurecr.io              # bicep output: acrLoginServer
+  imageRepository: devopsappcicd
+  webAppNameDev: app-devopsappcicd-dev                  # bicep output: webAppName (dev)
+  webAppNameProd: app-devopsappcicd-prod                # bicep output: webAppName (prod)
+  # ------------------------------------------------------------
+  tag: $(Build.BuildId)
+  MAVEN_CACHE_FOLDER: $(Pipeline.Workspace)/.m2/repository
+
+stages:
+  # ----------------------------------------------------------------------------
+  # Stage 1 - compile, unit test, coverage, publish the WAR
+  # ----------------------------------------------------------------------------
+  - stage: Build
+    displayName: Build & test
+    jobs:
+      - job: Maven
+        displayName: Maven verify
+        steps:
+          - task: Cache@2
+            displayName: Cache Maven repository
+            inputs:
+              key: 'maven | "$(Agent.OS)" | **/pom.xml'
+              restoreKeys: |
+                maven | "$(Agent.OS)"
+              path: $(MAVEN_CACHE_FOLDER)
+
+          - task: Maven@4
+            displayName: mvn verify (tests + coverage gate)
+            inputs:
+              mavenPomFile: pom.xml
+              goals: verify
+              options: -B -ntp -Dbuild.commit=$(Build.SourceVersion)
+              mavenOptions: -Xmx2048m -Dmaven.repo.local=$(MAVEN_CACHE_FOLDER)
+              javaHomeOption: JDKVersion
+              jdkVersionOption: '1.17'
+              jdkArchitectureOption: x64
+              publishJUnitResults: true
+              testResultsFiles: '**/surefire-reports/TEST-*.xml'
+
+          - task: PublishCodeCoverageResults@2
+            displayName: Publish JaCoCo coverage
+            condition: succeededOrFailed()
+            inputs:
+              summaryFileLocation: $(System.DefaultWorkingDirectory)/**/target/site/jacoco/jacoco.xml
+
+          - task: CopyFiles@2
+            displayName: Stage WAR
+            inputs:
+              contents: webapp/target/webapp.war
+              targetFolder: $(Build.ArtifactStagingDirectory)
+              flattenFolders: true
+
+          - publish: $(Build.ArtifactStagingDirectory)
+            artifact: war
+            displayName: Publish WAR artifact
+
+  # Docker + deployment stages are only compiled into the pipeline when enableDeploy is true.
+  - ${{ if eq(variables.enableDeploy, 'true') }}:
+    # --------------------------------------------------------------------------
+    # Stage 2 - build the image from the tested WAR and push it to ACR
+    # --------------------------------------------------------------------------
+    - stage: Docker
+      displayName: Docker image
+      dependsOn: Build
+      condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/master'))
+      jobs:
+        - job: BuildAndPush
+          displayName: Build & push to ACR
+          steps:
+            - download: current
+              artifact: war
+              displayName: Download WAR
+
+            - script: |
+                mkdir -p webapp/target
+                cp "$(Pipeline.Workspace)/war/webapp.war" webapp/target/webapp.war
+              displayName: Put WAR where AzureDockerfile expects it
+
+            - task: Docker@2
+              displayName: Build & push $(imageRepository):$(tag)
+              inputs:
+                command: buildAndPush
+                containerRegistry: ${{ variables.dockerRegistryServiceConnection }}
+                repository: $(imageRepository)
+                dockerfile: AzureDockerfile
+                buildContext: .
+                tags: |
+                  $(tag)
+                  latest
+
+    # --------------------------------------------------------------------------
+    # Stage 3 - deploy to dev, then smoke test
+    # --------------------------------------------------------------------------
+    - stage: DeployDev
+      displayName: Deploy dev
+      dependsOn: Docker
+      jobs:
+        - template: .azure-pipelines/templates/deploy-webapp.yml
+          parameters:
+            environment: dev
+            azureSubscription: ${{ variables.azureSubscription }}
+            webAppName: $(webAppNameDev)
+            image: $(containerRegistry)/$(imageRepository):$(tag)
+
+    # --------------------------------------------------------------------------
+    # Stage 4 - deploy to prod (add an "Approvals" check on the
+    #           devopsappcicd-prod environment to make this wait for a human)
+    # --------------------------------------------------------------------------
+    - stage: DeployProd
+      displayName: Deploy prod
+      dependsOn: DeployDev
+      jobs:
+        - template: .azure-pipelines/templates/deploy-webapp.yml
+          parameters:
+            environment: prod
+            azureSubscription: ${{ variables.azureSubscription }}
+            webAppName: $(webAppNameProd)
+            image: $(containerRegistry)/$(imageRepository):$(tag)

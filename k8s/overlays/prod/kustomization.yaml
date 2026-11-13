@@ -1,0 +1,47 @@
+# Prod: 3+ replicas, image from a registry, ingress and a disruption budget.
+#   kubectl apply -k k8s/overlays/prod
+# In CI/CD, pin the exact tag that was tested:
+#   cd k8s/overlays/prod && kustomize edit set image devopsappcicd=myregistry.azurecr.io/devopsappcicd:1234
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: devopsappcicd-prod
+
+resources:
+  - namespace.yaml
+  - ../../base
+  - ingress.yaml
+  - pdb.yaml
+
+images:
+  - name: devopsappcicd
+    newName: ghcr.io/ahmedeltofany/devopsappcicd
+    newTag: latest
+
+configMapGenerator:
+  - name: devopsappcicd-config
+    behavior: merge
+    literals:
+      - APP_ENV=prod
+
+patches:
+  - target:
+      kind: Deployment
+      name: devopsappcicd
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+      - op: replace
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: Always
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: devopsappcicd
+    patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 3
+      - op: replace
+        path: /spec/maxReplicas
+        value: 10

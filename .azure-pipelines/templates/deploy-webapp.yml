@@ -1,0 +1,44 @@
+# Reusable deployment job: deploy a container image to an Azure Web App and smoke test it.
+# Used once per environment by azure-pipelines.yml, so dev and prod deploy the exact same way.
+parameters:
+  - name: environment
+    type: string
+  - name: azureSubscription
+    type: string
+  - name: webAppName
+    type: string
+  - name: image
+    type: string
+
+jobs:
+  - deployment: Deploy
+    displayName: Deploy to ${{ parameters.environment }}
+    # Environments are created automatically on first use. Add approvals and checks in
+    # Azure DevOps: Pipelines > Environments > devopsappcicd-<env> > Approvals and checks.
+    environment: devopsappcicd-${{ parameters.environment }}
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            # Deployment jobs do not check out the repo by default; we need the smoke test script.
+            - checkout: self
+
+            - task: AzureWebAppContainer@1
+              displayName: Deploy ${{ parameters.image }}
+              inputs:
+                azureSubscription: ${{ parameters.azureSubscription }}
+                appName: ${{ parameters.webAppName }}
+                containers: ${{ parameters.image }}
+                appSettings: -APP_ENV ${{ parameters.environment }} -WEBSITES_PORT 8080
+
+            - task: AzureCLI@2
+              displayName: Smoke test ${{ parameters.environment }}
+              inputs:
+                azureSubscription: ${{ parameters.azureSubscription }}
+                scriptType: bash
+                scriptLocation: inlineScript
+                inlineScript: |
+                  set -euo pipefail
+                  host=$(az webapp list --query "[?name=='${{ parameters.webAppName }}'].defaultHostName | [0]" -o tsv)
+                  echo "Testing https://${host}"
+                  bash scripts/smoke-test.sh "https://${host}" "${{ parameters.environment }}"

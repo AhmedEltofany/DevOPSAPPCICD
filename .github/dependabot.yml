@@ -1,0 +1,20 @@
+# Dependabot opens pull requests when dependencies have updates; CI then tests them for you.
+version: 2
+updates:
+  - package-ecosystem: maven
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      test-libraries:
+        patterns: ["org.junit*", "org.mockito*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly

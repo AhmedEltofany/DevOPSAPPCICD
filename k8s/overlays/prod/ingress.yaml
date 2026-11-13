@@ -1,0 +1,18 @@
+# Exposes the app through an NGINX ingress controller. Change the host to your domain.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: devopsappcicd
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: devopsappcicd.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: devopsappcicd
+                port:
+                  name: http

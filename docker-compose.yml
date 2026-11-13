@@ -1,0 +1,25 @@
+# Run the whole app locally with one command:
+#
+#   docker compose up --build        # then open http://localhost:8080/
+#   docker compose up --scale app=3  # (remove the fixed host port first) - see docs/tutorials/03-docker.md
+#   docker compose down
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        GIT_COMMIT: ${GIT_COMMIT:-compose}
+        SKIP_TESTS: "true"
+    image: devopsappcicd:local
+    ports:
+      - "8080:8080"
+    environment:
+      APP_ENV: compose
+      # Flip to "false" and run `docker compose up -d` again to see /health/ready return 503.
+      APP_READY: "true"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512m
